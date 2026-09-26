@@ -1,0 +1,15 @@
+@"
+backend/
+PROJECT_CODE_EXPORT.txt
+desktop/build/
+desktop/dist/
+**/__pycache__/
+*.pyc
+*.pyo
+*.db
+.env
+.env.*
+.venv/
+venv/
+
+"@ | Set-Content .gitignore
