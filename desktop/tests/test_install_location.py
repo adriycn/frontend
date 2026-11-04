@@ -400,3 +400,62 @@ def test_settings_shows_the_location_and_hands_over_to_the_launcher(appdata, tmp
     monkeypatch.setattr(ms, "inform", lambda *a, **k: informed.append(a))
     mgr2.change_install_location()
     assert started == [] and not mgr2.mw.closed and len(informed) == 1
+
+
+_QAPP = []
+
+
+@pytest.fixture
+def chooser(boot, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+    if not _QAPP:
+        _QAPP.append(QApplication.instance() or QApplication([]))
+    monkeypatch.setattr(boot, "drives", lambda: [("C:", 40 * 1024 ** 3, 100 * 1024 ** 3), ("D:", 400 * 1024 ** 3, 500 * 1024 ** 3),
+                                                  ("E:", 1 * 1024 ** 3, 64 * 1024 ** 3)])
+    monkeypatch.setattr(boot, "drive_ready", lambda p: True)
+    monkeypatch.setattr(boot.shutil, "disk_usage", lambda p: type("U", (), {"free": 400 * 1024 ** 3, "total": 500 * 1024 ** 3, "used": 0})())
+    return boot
+
+
+def test_the_chooser_lists_drives_and_follows_the_selection(chooser):
+    dlg = chooser.LocationDialog("D:" + os.sep + "CReaper", True)
+    assert [r.letter for r in dlg.rows] == ["C:", "D:", "E:"]
+    assert [r.selected for r in dlg.rows] == [False, True, False]
+    assert [r.usable for r in dlg.rows] == [True, True, False]            # 1 GB free is not enough
+    dlg.rows[0].chosen.emit("C:")
+    assert dlg.path_edit.text() == "C:" + os.sep + "CReaper" and dlg.rows[0].selected and not dlg.rows[1].selected
+    assert dlg.ok.isEnabled() and "Installs to" in dlg.note.text()
+    assert dlg.ok.text() == "Install" and chooser.LocationDialog("D:" + os.sep + "x", False).ok.text() == "Move"
+
+
+def test_the_chooser_blocks_what_cannot_work_and_explains_why(chooser):
+    chooser.MAX_ROOT_LEN = chooser.REAL_MAX_ROOT_LEN
+    dlg = chooser.LocationDialog("D:" + os.sep + "CReaper", True)
+    dlg.path_edit.setText("relative folder")
+    assert not dlg.ok.isEnabled() and "full folder path" in dlg.note.text()
+    dlg.path_edit.setText(r"\\server\share\x")
+    assert not dlg.ok.isEnabled() and "Network" in dlg.note.text()
+    dlg.path_edit.setText("D:" + os.sep + "a" * 120)
+    assert not dlg.ok.isEnabled() and "too long" in dlg.note.text()
+    dlg.path_edit.setText("D:" + os.sep + "Videos")
+    assert dlg.ok.isEnabled() and dlg.note.text() == "Installs to D:" + os.sep + "Videos" + os.sep + "CReaper"
+
+
+def test_accepting_returns_the_checked_dedicated_folder(chooser, tmp_path, monkeypatch):
+    dlg = chooser.LocationDialog(str(tmp_path), True)
+    monkeypatch.setattr(chooser, "check_install_folder", lambda p: (str(tmp_path / "CReaper"), ""))
+    dlg._accept()
+    assert dlg.chosen == str(tmp_path / "CReaper") and dlg.result() == chooser.QDialog.DialogCode.Accepted
+    other = chooser.LocationDialog(str(tmp_path), True)
+    monkeypatch.setattr(chooser, "check_install_folder", lambda p: ("", "CReaper can't write to it."))
+    other._accept()
+    assert other.chosen == "" and "can't write" in other.note.text()
+
+
+def test_the_chooser_is_styled_like_the_launcher_window(chooser):
+    dlg = chooser.LocationDialog("D:" + os.sep + "CReaper", True)
+    win = chooser.ProgressWindow()
+    assert dlg.width() == win.width() == chooser.CARD_W + 2 * chooser.SHADOW_PAD          # the same card
+    assert dlg.windowFlags() & chooser.Qt.WindowType.FramelessWindowHint
+    assert dlg.card.styleSheet() == win.card.styleSheet()                                   # same surface and border
+    assert dlg.ok.styleSheet() == chooser._button("x", True).styleSheet()                  # the launcher's own buttons

@@ -1322,113 +1322,295 @@ class ProgressWindow(QDialog):
         os._exit(0)
 
 
+class _DriveRow(QWidget):
+    """One drive as a selectable row: letter, free space and a usage bar. Painted like the launcher's own controls."""
+    chosen = pyqtSignal(str)
+
+    def __init__(self, letter: str, free: int, total: int):
+        super().__init__()
+        self.letter, self.free, self.total = letter, free, total
+        self.selected = False
+        self.hover = False
+        self.usable = free >= MIN_FREE_BYTES
+        self.setFixedHeight(58)
+        self.setCursor(Qt.CursorShape.PointingHandCursor if self.usable else Qt.CursorShape.ForbiddenCursor)
+        self.setMouseTracking(True)
+        self.setAccessibleName(f"Drive {letter}, {human_bytes(free)} free")
+
+    def set_selected(self, on: bool):
+        self.selected = on
+        self.update()
+
+    def enterEvent(self, e):
+        self.hover = True
+        self.update()
+
+    def leaveEvent(self, e):
+        self.hover = False
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self.usable and self.rect().contains(e.position().toPoint()):
+            self.chosen.emit(self.letter)
+        e.accept()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        border = C_ACCENT if self.selected else (C_BORDER_HI if self.hover and self.usable else C_BORDER)
+        fill = QColor(C_ACCENT)
+        fill.setAlphaF(0.10)
+        p.setPen(QPen(QColor(border), 1.5 if self.selected else 1.0))
+        p.setBrush(fill if self.selected else QColor(C_SURFACE))
+        p.drawRoundedRect(r, 10, 10)
+        dim = 1.0 if self.usable else 0.45
+        p.setOpacity(dim)
+
+        # drive letter in a small tile
+        tile = QRectF(14, 13, 32, 32)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(C_ACCENT if self.selected else C_BORDER))
+        p.drawRoundedRect(tile, 8, 8)
+        p.setPen(QColor("#FFFFFF" if self.selected else C_MUTED))
+        p.setFont(ui_font(14, QFont.Weight.DemiBold))
+        p.drawText(tile, Qt.AlignmentFlag.AlignCenter, self.letter.rstrip(":"))
+
+        # name and free space
+        p.setPen(QColor(C_TEXT))
+        p.setFont(ui_font(13, QFont.Weight.DemiBold))
+        p.drawText(QRectF(58, 10, self.width() - 160, 20), Qt.AlignmentFlag.AlignVCenter, f"Drive {self.letter.rstrip(':')}")
+        p.setPen(QColor(C_BAD if not self.usable else C_MUTED))
+        p.setFont(ui_font(12))
+        sub = f"{human_bytes(self.free)} free of {human_bytes(self.total)}"
+        if not self.usable:
+            sub = f"Only {human_bytes(self.free)} free, not enough"
+        p.drawText(QRectF(58, 29, self.width() - 160, 18), Qt.AlignmentFlag.AlignVCenter, sub)
+
+        # usage bar (the same slim track as the progress bar)
+        bar = QRectF(self.width() - 118, 24, 100, 6)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(C_BORDER))
+        p.drawRoundedRect(bar, 3, 3)
+        used = 0.0 if not self.total else max(0.0, min(1.0, 1.0 - self.free / self.total))
+        if used > 0:
+            p.setBrush(QColor(C_BAD if used > 0.92 else C_ACCENT_LIGHT))
+            p.drawRoundedRect(QRectF(bar.left(), bar.top(), max(6.0, bar.width() * used), bar.height()), 3, 3)
+
+
+class _PathField(QFrame):
+    """The folder box: a folder glyph, the path, and a Browse button inside one rounded outline."""
+
+    def __init__(self, text: str):
+        super().__init__()
+        from PyQt6.QtWidgets import QLineEdit
+        self.setObjectName("PathField")
+        self.setFixedHeight(44)
+        self._apply_style(False)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(12, 0, 6, 0)
+        row.setSpacing(8)
+        row.addWidget(_Glyph("folder", C_SUBTLE, 16, 1.6), 0, Qt.AlignmentFlag.AlignVCenter)
+        self.edit = QLineEdit(text)
+        self.edit.setFont(ui_font(13))
+        self.edit.setFrame(False)
+        self.edit.setStyleSheet(f"QLineEdit {{ background: transparent; color: {C_TEXT}; border: none; "
+                                f"selection-background-color: {C_ACCENT}; }}")
+        self.edit.setPlaceholderText("Choose a folder")
+        self.edit.setCursorPosition(0)                  # show the start of a long path, not its tail
+        self.browse = QPushButton("Browse")
+        self.browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.browse.setFixedHeight(30)
+        self.browse.setFont(ui_font(12, QFont.Weight.DemiBold))
+        self.browse.setStyleSheet(f"""
+            QPushButton {{ background: {C_BORDER}; color: {C_TEXT}; border: none; border-radius: 7px; padding: 0 12px; }}
+            QPushButton:hover {{ background: {C_BORDER_HI}; }}
+            QPushButton:focus {{ outline: none; border: 1px solid {C_ACCENT_LIGHT}; }}""")
+        row.addWidget(self.edit, 1)
+        row.addWidget(self.browse)
+        self.edit.installEventFilter(self)
+
+    def _apply_style(self, focused: bool):
+        self.setStyleSheet(f"QFrame#PathField {{ background: {C_SURFACE}; border: 1px solid "
+                           f"{C_ACCENT if focused else C_BORDER}; border-radius: 10px; }}")
+
+    def eventFilter(self, obj, ev):
+        from PyQt6.QtCore import QEvent
+        if obj is self.edit and ev.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+            self._apply_style(ev.type() == QEvent.Type.FocusIn)
+        return super().eventFilter(obj, ev)
+
+
 class LocationDialog(QDialog):
-    """Where to install CReaper: any drive, any folder. Always ends in a dedicated CReaper folder (see
-    dedicated_folder), checked for existence, write access and free space before it can be accepted."""
+    """Where to install CReaper: any drive, any folder. The same card as the launcher window. The result always ends
+    in a dedicated CReaper folder (see dedicated_folder) and has been checked for existence, write access and free
+    space before it can be accepted."""
 
     def __init__(self, current: str, first_run: bool, parent=None):
         super().__init__(parent)
-        from PyQt6.QtWidgets import QComboBox, QLineEdit
-        self.setWindowTitle("CReaper - install location")
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowTitle("CReaper")
         self.setModal(True)
-        self.setMinimumWidth(CARD_W + 40)
-        self.setStyleSheet(f"QDialog {{ background: {C_BG}; }} QLabel {{ color: {C_TEXT}; }}")
+        self.setFixedWidth(CARD_W + 2 * SHADOW_PAD)
         self.chosen = ""
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 22, 24, 22)
-        lay.setSpacing(10)
+        self._drag_pos = None
+        self._first_run = first_run
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(SHADOW_PAD, SHADOW_PAD - 8, SHADOW_PAD, SHADOW_PAD + 8)
+        self.card = QFrame(self)
+        self.card.setObjectName("Card")
+        self.card.setStyleSheet(f"QFrame#Card {{ background: {C_BG}; border: 1px solid {C_BORDER}; border-radius: 16px; }}")
+        shadow = QGraphicsDropShadowEffect(self.card)
+        shadow.setBlurRadius(46)
+        shadow.setOffset(0, 14)
+        shadow.setColor(QColor(0, 0, 0, 150))
+        self.card.setGraphicsEffect(shadow)
+        outer.addWidget(self.card)
+
+        lay = QVBoxLayout(self.card)
+        lay.setContentsMargins(24, 18, 18, 22)
+        lay.setSpacing(0)
+
+        # header: logo, name, close (as in the launcher window)
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        logo = QLabel()
+        pm = QPixmap(resource_path("CRPR.png"))
+        if not pm.isNull():
+            dpr = self.devicePixelRatioF() or 1.0
+            pm = pm.scaled(int(26 * dpr), int(26 * dpr), Qt.AspectRatioMode.KeepAspectRatio,
+                           Qt.TransformationMode.SmoothTransformation)
+            pm.setDevicePixelRatio(dpr)
+            logo.setPixmap(pm)
+        logo.setFixedSize(26, 26)
+        name = QLabel("CReaper")
+        name.setFont(ui_font(14, QFont.Weight.DemiBold))
+        name.setStyleSheet(f"color: {C_TEXT};")
+        close = _IconButton()
+        close.clicked.connect(self.reject)
+        head.addWidget(logo)
+        head.addWidget(name)
+        head.addStretch()
+        head.addWidget(close)
+        lay.addLayout(head)
+        lay.addSpacing(20)
+
+        body = QVBoxLayout()
+        body.setContentsMargins(0, 0, 6, 0)
+        body.setSpacing(0)
         title = QLabel("Where should CReaper be installed?" if first_run else "Move CReaper to another folder")
-        title.setFont(ui_font(17, QFont.Weight.DemiBold))
-        lay.addWidget(title)
-        intro = QLabel("Pick any drive. The app, its AI models, clip projects and work files all go there, so a full C: "
-                       "drive is no problem. Your account and settings stay where they are." if first_run else
-                       "Your installed version and your data are copied to the new folder first, then removed from "
-                       "the old one. Your account and settings stay where they are.")
+        title.setFont(ui_font(19, QFont.Weight.DemiBold))
+        title.setStyleSheet(f"color: {C_TEXT};")
+        title.setWordWrap(True)
+        body.addWidget(title)
+        body.addSpacing(6)
+        intro = QLabel("The app, its AI models, projects and work files all go there, so a full C: drive is no problem. "
+                       "Your account and settings stay in your Windows profile." if first_run else
+                       "CReaper and its data are copied to the new folder first, then removed from the old one. "
+                       "Your account and settings stay where they are.")
         intro.setWordWrap(True)
-        intro.setFont(ui_font(12))
+        intro.setFont(ui_font(13))
         intro.setStyleSheet(f"color: {C_MUTED};")
-        lay.addWidget(intro)
+        body.addWidget(intro)
+        body.addSpacing(16)
 
-        lay.addSpacing(6)
-        self.drive_box = QComboBox()
-        self.drive_box.setFont(ui_font(13))
-        self.drive_box.setStyleSheet(
-            f"QComboBox {{ background: {C_SURFACE}; color: {C_TEXT}; border: 1px solid {C_BORDER_HI}; "
-            f"border-radius: 8px; padding: 7px 10px; }} QComboBox QAbstractItemView {{ background: {C_SURFACE}; "
-            f"color: {C_TEXT}; selection-background-color: {C_ACCENT}; }}")
+        self.rows = []
+        rows_lay = QVBoxLayout()
+        rows_lay.setSpacing(8)
         for letter, free, total in drives():
-            self.drive_box.addItem(f"{letter}   {human_bytes(free)} free of {human_bytes(total)}", letter)
-        lay.addWidget(self.drive_box)
+            row = _DriveRow(letter, free, total)
+            row.chosen.connect(self._drive_chosen)
+            self.rows.append(row)
+            rows_lay.addWidget(row)
+        body.addLayout(rows_lay)
+        body.addSpacing(14)
 
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        self.path_edit = QLineEdit(current)
-        self.path_edit.setFont(ui_font(13))
-        self.path_edit.setStyleSheet(
-            f"QLineEdit {{ background: {C_SURFACE}; color: {C_TEXT}; border: 1px solid {C_BORDER_HI}; "
-            f"border-radius: 8px; padding: 7px 10px; }} QLineEdit:focus {{ border-color: {C_ACCENT}; }}")
-        browse = _button("Browse...", primary=False)
-        browse.clicked.connect(self._browse)
-        row.addWidget(self.path_edit, 1)
-        row.addWidget(browse)
-        lay.addLayout(row)
+        folder_lbl = QLabel("Folder")
+        folder_lbl.setFont(ui_font(12, QFont.Weight.DemiBold))
+        folder_lbl.setStyleSheet(f"color: {C_SUBTLE};")
+        body.addWidget(folder_lbl)
+        body.addSpacing(6)
+        self.field = _PathField(current)
+        self.field.browse.clicked.connect(self._browse)
+        self.field.edit.textChanged.connect(self._refresh_note)
+        self.path_edit = self.field.edit
+        body.addWidget(self.field)
+        body.addSpacing(10)
 
         self.note = QLabel("")
         self.note.setWordWrap(True)
-        self.note.setFont(ui_font(12))
+        self.note.setFont(ui_font(12, tabular=True))
+        self.note.setMinimumHeight(34)
+        self.note.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        lay.addWidget(self.note)
+        body.addWidget(self.note)
+        lay.addLayout(body)
+        lay.addSpacing(14)
 
-        lay.addSpacing(4)
         buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 6, 0)
+        buttons.setSpacing(8)
         buttons.addStretch()
-        cancel = _button("Cancel", primary=False)
+        self.cancel_btn = _button("Cancel", primary=False)
         self.ok = _button("Install" if first_run else "Move", primary=True)
-        cancel.clicked.connect(self.reject)
+        self.cancel_btn.clicked.connect(self.reject)
         self.ok.clicked.connect(self._accept)
-        buttons.addWidget(cancel)
+        self.ok.setDefault(True)
+        self.cancel_btn.setMinimumWidth(92)
+        self.ok.setMinimumWidth(104)                    # "Install" was clipped at the default width
+        buttons.addWidget(self.cancel_btn)
         buttons.addWidget(self.ok)
         lay.addLayout(buttons)
 
-        self.drive_box.currentIndexChanged.connect(self._drive_changed)
-        self.path_edit.textChanged.connect(self._refresh_note)
-        letter = os.path.splitdrive(current)[0].upper()
-        idx = self.drive_box.findData(letter)
-        if idx >= 0:
-            self.drive_box.setCurrentIndex(idx)
+        self._select_row(os.path.splitdrive(current)[0].upper())
         self._refresh_note()
 
-    def _drive_changed(self):
-        letter = self.drive_box.currentData()
-        if letter and os.path.splitdrive(self.path_edit.text())[0].upper() != letter:
+    # ---------------------------------------------------------------- behaviour
+    def _select_row(self, letter: str):
+        for row in self.rows:
+            row.set_selected(row.letter.upper() == letter.upper())
+
+    def _drive_chosen(self, letter: str):
+        self._select_row(letter)
+        if os.path.splitdrive(self.path_edit.text())[0].upper() != letter.upper():
             self.path_edit.setText(os.path.join(letter + os.sep, FOLDER_NAME))
+            self.path_edit.setCursorPosition(0)
 
     def _browse(self):
         from PyQt6.QtWidgets import QFileDialog
-        start = self.path_edit.text() if os.path.isdir(os.path.dirname(self.path_edit.text())) else os.path.expanduser("~")
+        text = self.path_edit.text()
+        start = text if os.path.isdir(os.path.dirname(text) or ".") and text else os.path.expanduser("~")
         picked = QFileDialog.getExistingDirectory(self, "Choose where to install CReaper", start)
         if picked:
             self.path_edit.setText(os.path.normpath(picked))
+            self.path_edit.setCursorPosition(0)
 
     def _refresh_note(self):
-        """Where it will really go, and why it can't be used (shown while typing, without creating anything)."""
-        root = dedicated_folder(self.path_edit.text())
+        """Where it will really go, or why it can't be used. Shown while typing; creates nothing."""
+        text = self.path_edit.text()
+        self._select_row(os.path.splitdrive(text)[0].upper())
+        root = dedicated_folder(text)
+        bad = True
         if not root:
-            self.note.setText("Enter a full folder path, for example D:" + os.sep + "CReaper.")
-            self.note.setStyleSheet(f"color: {C_BAD};")
+            msg = "Enter a full folder path, for example D:" + os.sep + FOLDER_NAME
+        elif root.startswith(os.sep * 2):
+            msg = "Network folders are not supported. Pick a folder on a drive in this PC."
         elif not drive_ready(root):
-            self.note.setText(f"The drive {os.path.splitdrive(root)[0]} is not available.")
-            self.note.setStyleSheet(f"color: {C_BAD};")
+            msg = f"The drive {os.path.splitdrive(root)[0]} is not available."
         elif len(root) > MAX_ROOT_LEN:
-            self.note.setText(f"That path is too long ({len(root)} characters, at most {MAX_ROOT_LEN}). "
-                              "Choose a shorter folder.")
-            self.note.setStyleSheet(f"color: {C_BAD};")
+            msg = f"That path is too long ({len(root)} characters, at most {MAX_ROOT_LEN}). Choose a shorter folder."
         else:
             free = shutil.disk_usage(os.path.splitdrive(root)[0] + os.sep).free
-            low = free < MIN_FREE_BYTES
-            self.note.setText(f"CReaper will be installed in {root}\n{human_bytes(free)} free on {root[:2]}"
-                              + (f" - at least {human_bytes(MIN_FREE_BYTES)} is needed." if low else "."))
-            self.note.setStyleSheet(f"color: {C_BAD if low else C_MUTED};")
+            if free < MIN_FREE_BYTES:
+                msg = f"{root[:2]} has only {human_bytes(free)} free. CReaper needs at least {human_bytes(MIN_FREE_BYTES)}."
+            else:
+                bad = False
+                msg = f"Installs to {root}"
+        self.note.setText(msg)
+        self.note.setStyleSheet(f"color: {C_BAD if bad else C_MUTED};")
+        self.ok.setEnabled(not bad)
 
     def _accept(self):
         root, err = check_install_folder(self.path_edit.text())
@@ -1438,6 +1620,34 @@ class LocationDialog(QDialog):
             return
         self.chosen = root
         self.accept()
+
+    # ---------------------------------------------------------------- window behaviour (as the launcher window)
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.adjustSize()
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape:
+            self.reject()
+            return
+        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.ok.isEnabled():
+            self._accept()
+            return
+        super().keyPressEvent(e)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_pos is not None and event.buttons() == Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        event.accept()
 
 
 def ask_location(current: str, first_run: bool) -> str:
