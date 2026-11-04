@@ -158,7 +158,7 @@ def test_a_fresh_start_reads_the_pointer(appdata, tmp_path):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     assert mod.ROOT == root and mod.STATE_FILE == os.path.join(root, "state.json")
-    assert not mod.is_first_run()
+    assert mod.is_first_run()                                  # nothing is installed there yet: it will ask (prefilled)
 
 
 def test_the_folder_is_always_a_dedicated_creaper_folder(boot, tmp_path):
@@ -186,16 +186,29 @@ def test_too_little_free_space_is_refused(boot, tmp_path, monkeypatch):
     assert "free" in boot.check_install_folder(str(tmp_path / "x"))[1]
 
 
-def test_first_run_is_asked_once_and_existing_installs_are_not(boot, appdata, tmp_path):
+def test_the_folder_is_asked_whenever_nothing_is_installed(boot, appdata, tmp_path):
     assert boot.is_first_run()
-    boot.apply_new_location(str(tmp_path / "D" / "CReaper"))
-    assert not boot.is_first_run()
-    # an install from before this feature: a state.json and the exe, no pointer -> never asked, nothing changes
-    (appdata / "CReaper" / il.LOCATION_FILE).unlink()
+    root = tmp_path / "D" / "CReaper"
+    boot.apply_new_location(str(root))
+    assert boot.is_first_run()                                  # chosen, but the install never finished: ask again
+    (root / "versions" / "3.5.8").mkdir(parents=True)
+    (root / "versions" / "3.5.8" / "CReaper.exe").write_bytes(b"x")
+    boot.write_state({"current": "3.5.8"})
+    assert not boot.is_first_run()                              # installed: updates and launches never ask
+    import shutil
+    shutil.rmtree(root)                                         # the user deleted the install; the pointer is still there
+    assert il.read_location()["install_root"] == str(root)
+    assert boot.is_first_run() and boot.ROOT == str(root)       # ... so it asks again, with the last choice prefilled
+    boot.set_root("Q:" + os.sep + "CReaper")
+    assert not boot.is_first_run()                              # an unplugged drive gets its own error, not this question
+
+
+def test_an_install_from_before_this_feature_is_never_asked(boot, appdata):
     boot.set_root(str(appdata / "CReaper"))
     (appdata / "CReaper" / "versions" / "3.5.8").mkdir(parents=True)
     (appdata / "CReaper" / "versions" / "3.5.8" / "CReaper.exe").write_bytes(b"x")
     boot.write_state({"current": "3.5.8"})
+    assert not os.path.exists(il.location_path())
     assert not boot.is_first_run() and boot.ROOT == str(appdata / "CReaper")
 
 

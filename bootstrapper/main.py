@@ -187,8 +187,10 @@ def apply_new_location(root: str):
 
 
 def is_first_run() -> bool:
-    """No install anywhere yet: the folder is worth asking about."""
-    if os.path.isfile(LOCATION_FILE):
+    """Nothing is installed in the install folder: worth asking where to put it (the last choice is prefilled), also
+    after the user deleted the install or an earlier install was interrupted. A drive that is merely not there (an
+    unplugged disk) is not a reason to ask: the update flow shows that error and offers another folder."""
+    if not drive_ready(ROOT):
         return False
     return not is_installed(read_state().get("current"))
 
